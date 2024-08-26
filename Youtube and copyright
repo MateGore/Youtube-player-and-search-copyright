@@ -1,0 +1,288 @@
+import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from yt_dlp import YoutubeDL
+import os
+import sys
+
+TELEGRAM_TOKEN = 'TOKEN'
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
+
+youtube_ap_user_sessions = {} #Сохраняются сессии юзеров
+
+# Функции для /авторского права (ап)
+def youtube_ap_music_extract_music_info(description):
+    keywords = ["Музыка", "℗", "©", "Треков", "Copyright", "Авторские права", "Rights", "Исполнитель", "Альбом", "Лицензия", "Загрузки", "Ссылки", "https://"]
+    lines = description.splitlines()
+    music_info = []
+    capture = False
+
+    for line in lines:
+        if any(keyword in line for keyword in keywords):
+            capture = True
+            music_info.append(f"<b>{line.strip()}</b>")
+        elif capture and line.strip():
+            music_info.append(line.strip())
+        elif capture and not line.strip():
+            capture = False
+
+    return "\n".join(music_info) if music_info else "Информация о треке не найдена."
+
+def youtube_ap_music_search_youtube(query):
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'noplaylist': True,
+        'default_search': 'ytsearch1:',
+        'quiet': True,
+        'no_warnings': True,
+    }
+
+    with YoutubeDL(ydl_opts) as ydl:
+        info_dict = ydl.extract_info(query, download=False)
+        video_url = info_dict['entries'][0]['webpage_url']
+        title = info_dict['entries'][0]['title']
+        description = info_dict['entries'][0]['description']
+        music_info = youtube_ap_music_extract_music_info(description)
+    return video_url, title, music_info
+
+@bot.message_handler(commands=['ап'])
+def youtube_ap_music_download_audio(message):
+    query = message.text.split(maxsplit=1)
+    if len(query) < 2:
+        bot.reply_to(message, "Пожалуйста, укажите ссылку на YouTube или текстовый запрос.")
+        return
+
+    search_query = query[1]
+
+    if 'youtube.com' in search_query or 'youtu.be' in search_query:
+        url = search_query
+        title, music_info = None, None
+    else:
+        bot.reply_to(message, f"Ищу '{search_query}', пожалуйста, подождите...")
+        url, title, music_info = youtube_ap_music_search_youtube(search_query)
+
+    bot.reply_to(message, f"Трек найден! Ссылка: {url}\n{music_info}", parse_mode="HTML")
+
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': 'audio.%(ext)s',
+        'quiet': True,
+        'no_warnings': True,
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+    }
+
+    mp3_audio_file = None
+
+    try:
+        with open(os.devnull, 'w') as devnull:
+            sys.stdout = devnull
+            sys.stderr = devnull
+            with YoutubeDL(ydl_opts) as ydl:
+                info_dict = ydl.extract_info(url, download=True)
+                mp3_audio_file = ydl.prepare_filename(info_dict).replace('.webm', '.mp3').replace('.m4a', '.mp3')
+
+        sys.stdout = sys.__stdout__
+        sys.stderr = sys.__stderr__
+
+        if os.path.getsize(mp3_audio_file) > 15 * 1024 * 1024:  # 15 MB
+            bot.reply_to(message, "Трек слишком большой для отправки (превышает 15 МБ).")
+        else:
+            with open(mp3_audio_file, 'rb') as audio:
+                bot.send_audio(message.chat.id, audio, title=title)
+
+    except Exception as e:
+        bot.reply_to(message, f"Произошла ошибка: {str(e)}")
+
+    finally:
+        if mp3_audio_file and os.path.exists(mp3_audio_file):
+            os.remove(mp3_audio_file)
+
+# Функции для /поток
+def youtube_ap_search_youtube(query, num_results=10):
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'noplaylist': True,
+        'default_search': f'ytsearch{num_results}:',
+        'quiet': True,
+        'no_warnings': True,
+        'encoding': 'utf-8'
+    }
+
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            info_dict = ydl.extract_info(query, download=False)
+            if 'entries' in info_dict:
+                entries = [entry for entry in info_dict['entries'] if entry.get('availability') == 'public']
+            else:
+                if info_dict.get('availability') == 'public':
+                    entries = [info_dict]
+                else:
+                    entries = []
+
+            if not entries:
+                refined_query = f"{query} music video"
+                info_dict = ydl.extract_info(refined_query, download=False)
+                if 'entries' in info_dict:
+                    entries = [entry for entry in info_dict['entries'] if entry.get('availability') == 'public']
+                else:
+                    if info_dict.get('availability') == 'public':
+                        entries = [info_dict]
+                    else:
+                        entries = []
+    except Exception as e:
+        entries = []
+
+    return entries
+
+def youtube_ap_download_and_send_audio(chat_id, video_url, title):
+    def skip_long_or_large(info_dict):
+        duration = info_dict.get('duration')
+        filesize = info_dict.get('filesize')
+        if duration and duration > 720:
+            return 'Видео слишком длинное, пропуск'
+        if filesize and filesize > 15 * 1024 * 1024:
+            return 'Файл слишком большой, пропуск'
+        return None
+
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': 'audio.%(ext)s',
+        'quiet': True,
+        'no_warnings': True,
+        'continuedl': False,
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'match_filter': skip_long_or_large,
+    }
+
+    mp3_audio_file = None
+
+    try:
+        with open(os.devnull, 'w') as devnull:
+            sys.stdout = devnull
+            sys.stderr = devnull
+            with YoutubeDL(ydl_opts) as ydl:
+                info_dict = ydl.extract_info(video_url, download=True)
+                mp3_audio_file = ydl.prepare_filename(info_dict).replace('.webm', '.mp3').replace('.m4a', '.mp3')
+
+        sys.stdout = sys.__stdout__
+        sys.stderr = sys.__stderr__
+
+        if mp3_audio_file and os.path.exists(mp3_audio_file):
+            if os.path.getsize(mp3_audio_file) > 15 * 1024 * 1024:
+                os.remove(mp3_audio_file)
+                return False
+
+            with open(mp3_audio_file, 'rb') as audio:
+                bot.send_audio(chat_id, audio, title=title)
+
+    except Exception as e:
+        print(f"Error downloading {title}: {str(e)}")
+        return False
+
+    finally:
+        if mp3_audio_file and os.path.exists(mp3_audio_file):
+            os.remove(mp3_audio_file)
+
+    return True
+
+def youtube_ap_update_buttons(chat_id):
+    markup = InlineKeyboardMarkup()
+    search_button = InlineKeyboardButton("🔍 Поиск", callback_data="musicbot_search")
+    rules_button = InlineKeyboardButton("📜 Правила", callback_data="musicbot_rules")
+    next_button = InlineKeyboardButton("➡️ Дальше", callback_data="musicbot_next")
+    markup.add(search_button, rules_button)
+    markup.add(next_button)
+    bot.send_message(chat_id, "Выберите действие:", reply_markup=markup)
+
+@bot.message_handler(commands=['поток'])
+def youtube_ap_start_stream(message):
+    chat_id = message.chat.id
+    youtube_ap_user_sessions[chat_id] = {"search_query": None, "tracks": [], "played_urls": [], "searching": False}
+    youtube_ap_update_buttons(chat_id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("musicbot_"))
+def youtube_ap_callback_query_handler(call):
+    chat_id = call.message.chat.id
+    session = youtube_ap_user_sessions.get(chat_id)
+
+    if not session:
+        bot.send_message(chat_id, "Ошибка: сессия не найдена. Пожалуйста, начните заново с команды /поток.")
+        return
+
+    if call.data == "musicbot_search":
+        bot.send_message(chat_id, "Введите запрос для поиска (например, ссылка на YouTube или имя исполнителя с треком).")
+        bot.register_next_step_handler(call.message, youtube_ap_handle_search)
+    elif call.data == "musicbot_rules":
+        bot.send_message(chat_id, "📜 Правила:\n1. Не вводите СЛИШКОМ короткие названия.\n2. Убедитесь, что трек доступен на YouTube.\n3. Если трек не найден, попробуйте другой запрос.\n4. Не стоит делать множетсво запросов. Запрос - ожидание.\n5. Размер трека не должен превышать 15 МБ. Это значит, что не стоит грузить стримы, концерты и т.д.\n6. Видео длиной более 12 минут НЕ будут пропущены.\n7. Кнопка далее постарается подобрать трек на основе вашего заданного.\n8 Поддерживает ссылки на ютьюб! Другого рода ссылки не стоит использовать.")
+    elif call.data == "musicbot_next":
+        if session["tracks"]:
+            bot.send_message(chat_id, "Подождите, гружу следующий трек!")
+            track = session["tracks"].pop(0)
+            video_url = track['webpage_url']
+            title = track.get('title', 'Без названия')
+            success = youtube_ap_download_and_send_audio(chat_id, video_url, title)
+            if not success:
+                bot.send_message(chat_id, "Этот трек был пропущен. Попробуйте другой трек.")
+            else:
+                session['played_urls'].append(video_url)
+                if len(session['played_urls']) >= 10:
+                    bot.send_message(chat_id, "Достигнуто максимальное количество треков (10). Попробуйте другой запрос.")
+        else:
+            bot.send_message(chat_id, "Идет подгрузка треков, пожалуйста, будьте терпеливы...")
+            if session["search_query"]:
+                tracks = youtube_ap_search_youtube(session["search_query"], num_results=10)
+                session["tracks"] = [track for track in tracks if track['webpage_url'] not in session['played_urls']]
+                if session["tracks"]:
+                    track = session["tracks"].pop(0)
+                    video_url = track['webpage_url']
+                    title = track.get('title', 'Без названия')
+                    success = youtube_ap_download_and_send_audio(chat_id, video_url, title)
+                    if not success:
+                        bot.send_message(chat_id, "Этот трек был пропущен. Попробуйте другой трек.")
+                    else:
+                        session['played_urls'].append(video_url)
+                        if len(session['played_urls']) >= 10:
+                            bot.send_message(chat_id, "Достигнуто максимальное количество треков (10). Попробуйте другой запрос.")
+                else:
+                    bot.send_message(chat_id, "Треки не найдены. Пожалуйста, попробуйте другой запрос.")
+            else:
+                bot.send_message(chat_id, "Сначала выполните поиск.")
+        youtube_ap_user_sessions[chat_id] = session
+
+def youtube_ap_handle_search(message):
+    chat_id = message.chat.id
+    query = message.text.strip()
+
+    if not query:
+        bot.send_message(chat_id, "Пожалуйста, введите запрос.")
+        return
+
+    session = youtube_ap_user_sessions.get(chat_id)
+    if session:
+        bot.send_message(chat_id, "Идет поиск, ожидайте...")
+        session["search_query"] = query
+        tracks = youtube_ap_search_youtube(query, num_results=10)
+        session["tracks"] = [track for track in tracks if track['webpage_url'] not in session['played_urls']]
+        
+        if session["tracks"]:
+            track = session["tracks"].pop(0)
+            video_url = track['webpage_url']
+            title = track.get('title', 'Без названия')
+            success = youtube_ap_download_and_send_audio(chat_id, video_url, title)
+            if not success:
+                bot.send_message(chat_id, "Этот трек был пропущен. Попробуйте другой трек.")
+            else:
+                session['played_urls'].append(video_url)
+        else:
+            bot.send_message(chat_id, "Треки не найдены. Пожалуйста, попробуйте другой запрос.")
+        youtube_ap_user_sessions[chat_id] = session
+    youtube_ap_update_buttons(chat_id)
+
+bot.polling()
